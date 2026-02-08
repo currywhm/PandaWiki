@@ -1,0 +1,66 @@
+server:
+  port: 5050
+  mode: release
+  read_timeout: 120s
+  write_timeout: 120s
+  idle_timeout: 300s
+
+database:
+  host: panda-wiki-postgres
+  port: 5432
+  user: panda-wiki
+  password: "123456"
+  dbname: raglite
+
+pipeline:
+  queue_size: 1000
+  num_workers: 10
+
+embedding:
+  batch_size: 10
+  batch_timeout_ms: 10000
+
+batcher:
+  batch_size: 10
+  batch_timeout_ms: 10000
+
+llm_batcher:
+  batch_size: 20
+  batch_timeout_ms: 5000
+  max_concurrent: 10
+  request_delay_ms: 500
+
+minio:
+  endpoint: panda-wiki-minio:9000
+  user: s3panda-wiki
+  password: minio-secret-key
+  bucket: raglite
+  pandawiki_bucket: static-file
+  use_ssl: false
+
+qdrant:
+  host: panda-wiki-qdrant
+  port: 6334
+  api_key: ""
+  collection: raglite
+  dimension: 1024
+  max_top_k: 10
+  query_timeout: 90s
+  max_retries: 3
+
+nats:
+  url: nats://panda-wiki:nats-secret@panda-wiki-nats:4222
+
+gse:
+  dict_path: "/app/data/gse/dict"
+  language: "all"
+
+otel:
+  enabled: false
+  endpoint: otel-collector:4317
+  insecure: true
+  service_name: raglite
+  log_level: info
+
+raglite:
+  default_api_token: "sk-local"

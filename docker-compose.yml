@@ -1,0 +1,183 @@
+services:
+  # PostgreSQL 数据库
+  panda-wiki-postgres:
+    image: postgres:16-alpine
+    container_name: panda-wiki-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: panda-wiki
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-panda-wiki-secret}
+      POSTGRES_DB: panda-wiki
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panda-wiki -d panda-wiki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panda-wiki-network
+
+  # Redis 缓存
+  panda-wiki-redis:
+    image: redis:7-alpine
+    container_name: panda-wiki-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panda-wiki-network
+
+  # NATS 消息队列
+  panda-wiki-nats:
+    image: nats:2-alpine
+    container_name: panda-wiki-nats
+    restart: unless-stopped
+    command: >
+      --user panda-wiki
+      --pass ${NATS_PASSWORD:-nats-secret}
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "nats-server", "--help"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panda-wiki-network
+
+  # MinIO 对象存储
+  panda-wiki-minio:
+    image: minio/minio:latest
+    container_name: panda-wiki-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-s3panda-wiki}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minio-secret-key}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panda-wiki-network
+
+  # 后端 API 服务
+  panda-wiki-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    container_name: panda-wiki-api
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panda-wiki-secret}
+      - NATS_PASSWORD=${NATS_PASSWORD:-nats-secret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-minio-secret-key}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - MQ_NATS_SERVER=nats://panda-wiki-nats:4222
+      - REDIS_ADDR=panda-wiki-redis:6379
+      - S3_ENDPOINT=panda-wiki-minio:9000
+      - RAG_CT_RAG_BASE_URL=${RAG_BASE_URL:-https://api.baizhi.cloud}
+      - RAG_CT_RAG_API_KEY=${RAG_API_KEY:-}
+      - SENTRY_ENABLED=false
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      panda-wiki-postgres:
+        condition: service_healthy
+      panda-wiki-redis:
+        condition: service_healthy
+      panda-wiki-nats:
+        condition: service_started
+      panda-wiki-minio:
+        condition: service_healthy
+    networks:
+      - panda-wiki-network
+
+  # 后端 Consumer 服务
+  panda-wiki-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.consumer
+    container_name: panda-wiki-consumer
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panda-wiki-secret}
+      - NATS_PASSWORD=${NATS_PASSWORD:-nats-secret}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-minio-secret-key}
+      - MQ_NATS_SERVER=nats://panda-wiki-nats:4222
+      - REDIS_ADDR=panda-wiki-redis:6379
+      - S3_ENDPOINT=panda-wiki-minio:9000
+      - RAG_CT_RAG_BASE_URL=${RAG_BASE_URL:-https://api.baizhi.cloud}
+      - RAG_CT_RAG_API_KEY=${RAG_API_KEY:-}
+      - SENTRY_ENABLED=false
+    depends_on:
+      panda-wiki-postgres:
+        condition: service_healthy
+      panda-wiki-redis:
+        condition: service_healthy
+      panda-wiki-nats:
+        condition: service_started
+      panda-wiki-minio:
+        condition: service_healthy
+    networks:
+      - panda-wiki-network
+
+  # 前端管理后台
+  panda-wiki-admin:
+    build:
+      context: ./web
+      dockerfile: admin/Dockerfile.build
+      args:
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-/api}
+    container_name: panda-wiki-admin
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_PORT:-2443}:80"
+    depends_on:
+      - panda-wiki-api
+    networks:
+      - panda-wiki-network
+
+  # 前端用户端
+  panda-wiki-app:
+    build:
+      context: ./web
+      dockerfile: app/Dockerfile.build
+      args:
+        - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-}
+    container_name: panda-wiki-app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    ports:
+      - "${APP_PORT:-3010}:3010"
+    depends_on:
+      - panda-wiki-api
+    networks:
+      - panda-wiki-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  minio_data:
+
+networks:
+  panda-wiki-network:
+    driver: bridge

@@ -1,0 +1,186 @@
+services:
+  # PostgreSQL 数据库
+  panda-wiki-postgres:
+    image: chaitin-registry.cn-hangzhou.cr.aliyuncs.com/chaitin/panda-wiki-postgres:17.5
+    container_name: panda-wiki-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: panda-wiki
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-panda-wiki-secret}
+      POSTGRES_DB: panda-wiki
+      POSTGRES_MULTIPLE_DATABASES: raglite
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panda-wiki -d panda-wiki"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - panda-wiki-network
+
+  # Qdrant 向量数据库
+  panda-wiki-qdrant:
+    image: chaitin-registry.cn-hangzhou.cr.aliyuncs.com/chaitin/panda-wiki-qdrant:v1.14.1
+    container_name: panda-wiki-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - panda-wiki-network
+
+  # Redis 缓存
+  panda-wiki-redis:
+    image: redis:7-alpine
+    container_name: panda-wiki-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - panda-wiki-network
+
+  # NATS 消息队列
+  panda-wiki-nats:
+    image: chaitin-registry.cn-hangzhou.cr.aliyuncs.com/chaitin/panda-wiki-nats:2.11.3-alpine
+    container_name: panda-wiki-nats
+    restart: unless-stopped
+    command: >
+      --user panda-wiki
+      --pass ${NATS_PASSWORD:-nats-secret}
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats_data:/data
+    networks:
+      - panda-wiki-network
+
+  # MinIO 对象存储
+  panda-wiki-minio:
+    image: minio/minio:latest
+    container_name: panda-wiki-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: s3panda-wiki
+      MINIO_ROOT_PASSWORD: minio-secret-key
+    volumes:
+      - minio_data:/data
+    networks:
+      - panda-wiki-network
+
+  # RAGLite 服务
+  panda-wiki-raglite:
+    image: chaitin-registry.cn-hangzhou.cr.aliyuncs.com/chaitin/panda-wiki-raglite:1-4-1
+    container_name: panda-wiki-raglite
+    restart: unless-stopped
+    volumes:
+      - ./raglite-config.yaml:/app/config/config.yaml
+    depends_on:
+      panda-wiki-postgres:
+        condition: service_healthy
+      panda-wiki-qdrant:
+        condition: service_started
+      panda-wiki-nats:
+        condition: service_started
+      panda-wiki-minio:
+        condition: service_started
+    networks:
+      - panda-wiki-network
+
+  # 后端 API 服务 - 使用本地构建
+  panda-wiki-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    container_name: panda-wiki-api
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panda-wiki-secret}
+      - NATS_PASSWORD=${NATS_PASSWORD:-nats-secret}
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - MQ_NATS_SERVER=nats://panda-wiki:${NATS_PASSWORD:-nats-secret}@panda-wiki-nats:4222
+      - RAG_CT_RAG_BASE_URL=http://panda-wiki-raglite:5050
+      - RAG_CT_RAG_API_KEY=sk-local
+      - S3_ENDPOINT=panda-wiki-minio:9000
+      - S3_SECRET_KEY=minio-secret-key
+      - REDIS_ADDR=panda-wiki-redis:6379
+      - SENTRY_ENABLED=false
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      - panda-wiki-postgres
+      - panda-wiki-nats
+      - panda-wiki-raglite
+      - panda-wiki-minio
+      - panda-wiki-redis
+    networks:
+      - panda-wiki-network
+
+  # 后端 Consumer 服务 - 使用本地构建
+  panda-wiki-consumer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.consumer
+    container_name: panda-wiki-consumer
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-panda-wiki-secret}
+      - NATS_PASSWORD=${NATS_PASSWORD:-nats-secret}
+      - JWT_SECRET=${JWT_SECRET:-your-jwt-secret-key}
+      - MQ_NATS_SERVER=nats://panda-wiki:${NATS_PASSWORD:-nats-secret}@panda-wiki-nats:4222
+      - RAG_CT_RAG_BASE_URL=http://panda-wiki-raglite:5050
+      - RAG_CT_RAG_API_KEY=sk-local
+      - S3_ENDPOINT=panda-wiki-minio:9000
+      - S3_SECRET_KEY=minio-secret-key
+      - REDIS_ADDR=panda-wiki-redis:6379
+      - SENTRY_ENABLED=false
+    depends_on:
+      - panda-wiki-postgres
+      - panda-wiki-nats
+      - panda-wiki-raglite
+    networks:
+      - panda-wiki-network
+
+  # 前端 (Nginx) - 使用自定义构建
+  panda-wiki-nginx:
+    build:
+      context: ./web
+      dockerfile: admin/Dockerfile.build
+      args:
+        - VITE_API_BASE_URL=/api
+    container_name: panda-wiki-nginx
+    restart: unless-stopped
+    ports:
+      - "${ADMIN_PORT:-2443}:80"
+    depends_on:
+      - panda-wiki-api
+    networks:
+      - panda-wiki-network
+
+  # 前端用户端
+  panda-wiki-app:
+    image: chaitin-registry.cn-hangzhou.cr.aliyuncs.com/chaitin/panda-wiki-app:v3.70.1
+    container_name: panda-wiki-app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    ports:
+      - "${APP_PORT:-3010}:3010"
+    depends_on:
+      - panda-wiki-api
+    networks:
+      - panda-wiki-network
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  nats_data:
+  minio_data:
+
+networks:
+  panda-wiki-network:
+    driver: bridge
